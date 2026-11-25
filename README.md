@@ -6,9 +6,9 @@ Plugin simples para o **Vencord** que libera **Go Live**, câmera e seleção de
 
 ## Pré-requisitos
 
-### Para usuários comuns (instalação pré-compilada — recomendado)
+### Para usuários comuns (pré-compilado)
 - **Windows 10 ou 11 (64-bit)**
-- **Discord** para desktop instalado
+- **Discord** para desktop com o **Vencord já instalado e configurado** ([vencord.dev](https://vencord.dev))
 - **Conta gratuita na ProtonVPN** (ou outro provedor WireGuard) para baixar um arquivo `.conf`
 - *Não precisa de Node.js, Git nem pnpm.*
 
@@ -38,9 +38,9 @@ irm https://raw.githubusercontent.com/PedroGGC/GoLiveOpen/main/Install-GoLiveOpe
 ```
 
 O script abre um menu com as opções:
-1. **Instalar / Reinstalar tudo** — instala o WireSock SDK oficial (validado por SHA-256), configura o serviço do túnel e instala o Vencord pré-compilado com o **GoLiveOpen** (ou compila no seu checkout local do Vencord, se houver).
+1. **Instalar / Reinstalar** — instala o WireSock SDK oficial (validado por SHA-256), configura o serviço do túnel e adiciona o **GoLiveOpen** ao seu Vencord já instalado (ou compila no seu checkout local do Vencord, se houver).
 2. **Atualizar** — baixa a versão mais recente pré-compilada (ou recompila seu checkout) e mantém o serviço ativo.
-3. **Desinstalar apenas o plugin e o túnel** — remove o plugin e o serviço do GoLiveOpen, mantendo o WireSock instalado.
+3. **Desinstalar apenas o plugin e o túnel** — remove o plugin (restaurando o backup do Vencord) e o serviço do GoLiveOpen, mantendo o WireSock instalado.
 4. **Desinstalar tudo** — remove o plugin, o serviço, os arquivos de configuração e o WireSock.
 
 *(Também aceita `-Action Install | Update | UninstallPlugin | UninstallAll` direto via parâmetro.)*
