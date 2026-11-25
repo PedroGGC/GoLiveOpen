@@ -17,8 +17,8 @@ Plugin simples para o **Vencord** que libera **Go Live**, câmera e seleção de
 ## Como funciona
 
 ```text
-Discord.exe / Update.exe  ──▶  WireSock (serviço do Windows)  ──▶  Seu arquivo .conf WireGuard
-Jogos, Steam, Navegador   ──▶  Conexão direta normal (0 ms de impacto)
+Discord.exe / Update.exe  ──  WireSock (serviço do Windows)  ──  Seu arquivo .conf WireGuard
+Jogos, Steam, Navegador   ──  Conexão direta normal (0 ms de impacto)
 ```
 
 - **No Windows:** o serviço **WireSock** aplica um filtro por aplicativo (`#@ws:AllowedApps = Discord, Update`, sem alterar o DNS do Windows), mantendo jogos e demais programas fora do túnel.
@@ -39,9 +39,6 @@ O script abre um menu com as opções:
 2. **Atualizar** — baixa a versão mais recente pré-compilada (ou recompila seu checkout) e mantém o serviço ativo.
 3. **Desinstalar apenas o plugin e o túnel** — remove o plugin (restaurando o backup do Vencord) e o serviço do GoLiveOpen, mantendo o WireSock instalado.
 4. **Desinstalar tudo** — remove o plugin, o serviço, os arquivos de configuração e o WireSock.
-
-*(Também aceita `-Action Install | Update | UninstallPlugin | UninstallAll` direto via parâmetro.)*
-
 ---
 
 ## Como usar no Discord
