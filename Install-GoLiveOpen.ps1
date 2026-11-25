@@ -1,5 +1,7 @@
 ﻿[CmdletBinding()]
 param(
+    [ValidateSet("", "Install", "Update", "UninstallPlugin", "UninstallAll")]
+    [string]$Action = "",
     [string]$ConfPath = "",
     [string]$VencordDir = "",
     [ValidateSet("Automatic", "Manual")]
@@ -24,15 +26,39 @@ function Test-IsAdmin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Show-Menu {
+    Write-Host ""
+    Write-Host "=== GoLiveOpen ===" -ForegroundColor Cyan
+    Write-Host "  [1] Instalar / Reinstalar tudo (WireSock + tunel + plugin Vencord)"
+    Write-Host "  [2] Atualizar plugin e servico"
+    Write-Host "  [3] Desinstalar apenas o plugin e o tunel (mantem o WireSock)"
+    Write-Host "  [4] Desinstalar tudo (plugin, tunel e WireSock)"
+    Write-Host "  [0] Sair"
+    Write-Host ""
+
+    while ($true) {
+        $choice = (Read-Host "Escolha uma opcao").Trim()
+        switch ($choice) {
+            "1" { return "Install" }
+            "2" { return "Update" }
+            "3" { return "UninstallPlugin" }
+            "4" { return "UninstallAll" }
+            "0" { return "" }
+            default { Write-Host "Opcao invalida. Digite 1, 2, 3, 4 ou 0." -ForegroundColor Yellow }
+        }
+    }
+}
+
 function Select-ConfFile {
     param([string]$InitialDir)
 
+    $escapedDir = $InitialDir -replace "'", "''"
     $pickerScript = @"
 Add-Type -AssemblyName System.Windows.Forms
 `$dlg = New-Object System.Windows.Forms.OpenFileDialog
-`$dlg.Title = 'Selecione o arquivo WireGuard (.conf) da ProtonVPN (ou cancele para escolher depois no Discord)'
+`$dlg.Title = 'Selecione o arquivo WireGuard (.conf) (ou cancele para escolher depois no Discord)'
 `$dlg.Filter = 'WireGuard Config (*.conf)|*.conf|Todos os arquivos (*.*)|*.*'
-if (Test-Path '$($InitialDir -replace "'", "''")') { `$dlg.InitialDirectory = '$($InitialDir -replace "'", "''")' }
+if (Test-Path '$escapedDir') { `$dlg.InitialDirectory = '$escapedDir' }
 if (`$dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output `$dlg.FileName }
 "@
     $picked = & powershell.exe -NoProfile -STA -Command $pickerScript 2>$null
@@ -72,14 +98,14 @@ function Install-WireSock {
     $hash = (Get-FileHash -Path $tempInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($hash -ne $WireSockSha256) {
         Remove-Item $tempInstaller -Force -ErrorAction SilentlyContinue
-        throw "SHA-256 do instalador WireSock não confere (esperado $WireSockSha256, obtido $hash)."
+        throw "SHA-256 do instalador WireSock nao confere (esperado $WireSockSha256, obtido $hash)."
     }
 
     Write-Host "  Instalando WireSock SDK..." -ForegroundColor Cyan
     $proc = Start-Process -FilePath $tempInstaller -ArgumentList @("/quiet", "/norestart") -Wait -PassThru
     Remove-Item $tempInstaller -Force -ErrorAction SilentlyContinue
     if ($proc.ExitCode -ne 0) {
-        throw "Instalador do WireSock retornou código $($proc.ExitCode)."
+        throw "Instalador do WireSock retornou codigo $($proc.ExitCode)."
     }
 
     $deadline = (Get-Date).AddSeconds(30)
@@ -88,17 +114,51 @@ function Install-WireSock {
         if ($found) { return $found }
         Start-Sleep -Milliseconds 500
     }
-    throw "WireSock instalado, mas wiresock-client.exe não foi encontrado."
+    throw "WireSock instalado, mas wiresock-client.exe nao foi encontrado."
+}
+
+function Uninstall-WireSockPackage {
+    $regPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $entries = Get-ItemProperty -Path $regPaths -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -match "WireSock" }
+
+    $removed = $false
+    foreach ($entry in $entries) {
+        $cmd = if ($entry.QuietUninstallString) { $entry.QuietUninstallString } else { $entry.UninstallString }
+        if (-not $cmd) { continue }
+
+        Write-Host "  Removendo $($entry.DisplayName)..." -ForegroundColor Cyan
+        if ($cmd -match '^msiexec(?:\.exe)?\s+(.+)$') {
+            $msiArgs = ($Matches[1] -replace '/I', '/X') + " /qn /norestart"
+            $p = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru
+            if ($p.ExitCode -eq 0) { $removed = $true }
+        } elseif ($cmd -match '^"([^"]+)"(.*)$' -or $cmd -match '^(\S+)(.*)$') {
+            $exe = $Matches[1]
+            $extra = $Matches[2].Trim()
+            $argsList = if ($extra) { "$extra /quiet /norestart" } else { "/uninstall /quiet /norestart" }
+            if (Test-Path $exe) {
+                $p = Start-Process -FilePath $exe -ArgumentList $argsList -Wait -PassThru
+                if ($p.ExitCode -eq 0) { $removed = $true }
+            }
+        }
+    }
+
+    if (-not $removed -and (Find-WireSockClient)) {
+        Write-Host "  Nao foi possivel desinstalar o WireSock automaticamente; remova em Configuracoes > Aplicativos > WireSock Secure Connect." -ForegroundColor Yellow
+    }
 }
 
 function ConvertTo-DiscordWireSockConf {
     param([string]$RawText)
 
     if ($RawText -notmatch '(?mi)^\s*\[Interface\]\s*$' -or $RawText -notmatch '(?mi)^\s*\[Peer\]\s*$') {
-        throw "Arquivo .conf inválido: faltam seções [Interface] ou [Peer]."
+        throw "Arquivo .conf invalido: faltam secoes [Interface] ou [Peer]."
     }
-    if ($RawText -notmatch '(?mi)^\s*PrivateKey\s*=' -or $RawText -notmatch '(?mi)^\s*PublicKey\s*=' -or $RawText -notmatch '(?mi)^\s*Endpoint\s*=') {
-        throw "Arquivo .conf incompleto: PrivateKey, PublicKey ou Endpoint ausentes."
+    if ($RawText -notmatch '(?mi)^\s*PrivateKey\s*=' -or $RawText -notmatch '(?mi)^\s*Address\s*=' -or $RawText -notmatch '(?mi)^\s*PublicKey\s*=' -or $RawText -notmatch '(?mi)^\s*Endpoint\s*=') {
+        throw "Arquivo .conf incompleto: PrivateKey, Address, PublicKey ou Endpoint ausentes."
     }
 
     $lines = [System.Collections.Generic.List[string]]::new()
@@ -108,7 +168,7 @@ function ConvertTo-DiscordWireSockConf {
         $lines.Add($line)
     }
 
-    # WireSock só aplica AllowedApps dentro da seção [Peer]
+    # WireSock so aplica AllowedApps dentro da secao [Peer]
     $peerIdx = -1
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -match '^\s*\[Peer\]\s*$') { $peerIdx = $i; break }
@@ -138,105 +198,217 @@ function Find-VencordCheckout {
     return $null
 }
 
-if (-not (Test-IsAdmin)) {
-    if (-not $SkipConf -and -not $ConfPath) {
-        $ConfPath = Select-ConfFile -InitialDir (Join-Path $env:USERPROFILE "Downloads")
+function Invoke-VencordBuild {
+    param([string]$VencordPath)
+
+    if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+        Write-Host "  pnpm nao encontrado; rode 'pnpm build --dev' manualmente em $VencordPath." -ForegroundColor Yellow
+        return
     }
-
-    $argList = @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", "`"$PSCommandPath`"",
-        "-Startup", $Startup
-    )
-    if ($ConfPath -and (Test-Path $ConfPath)) {
-        $argList += @("-ConfPath", "`"$((Resolve-Path $ConfPath).Path)`"")
-    } else {
-        $argList += "-SkipConf"
+    Push-Location $VencordPath
+    try {
+        & pnpm build --dev
+    } finally {
+        Pop-Location
     }
-    if ($VencordDir) { $argList += @("-VencordDir", "`"$VencordDir`"") }
-    if ($SkipVencord) { $argList += "-SkipVencord" }
-
-    Write-Host "Solicitando permissão de administrador (1 vez só)..." -ForegroundColor Cyan
-    $elevated = Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs -Wait -PassThru
-    exit $elevated.ExitCode
 }
 
-if ([Environment]::Is64BitOperatingSystem -eq $false) {
-    throw "Este instalador exige Windows 64-bit (x64)."
+function Install-VencordPlugin {
+    param([string]$VencordPath, [switch]$PreferRemote)
+
+    $pluginDestDir = Join-Path $VencordPath "src\userplugins\goLiveOpen"
+    New-Item -ItemType Directory -Path $pluginDestDir -Force | Out-Null
+
+    foreach ($fileName in @("index.tsx", "native.ts")) {
+        $localFile = Join-Path $PSScriptRoot "plugin\goLiveOpen\$fileName"
+        $destFile = Join-Path $pluginDestDir $fileName
+        if (-not $PreferRemote -and (Test-Path $localFile)) {
+            Copy-Item -Path $localFile -Destination $destFile -Force
+        } else {
+            Invoke-WebRequest -Uri "$PluginBaseUrl/$fileName" -OutFile $destFile -UseBasicParsing
+        }
+    }
+    Invoke-VencordBuild -VencordPath $VencordPath
 }
 
-New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
-# Permite que o usuário local atualize o discord.conf direto pelas configurações do Vencord
-& icacls.exe $DataDir /grant "*S-1-5-32-545:(OI)(CI)M" | Out-Null
-
-Write-Host "[1/4] Verificando WireSock SDK $WireSockVersion..." -ForegroundColor Green
-$wireSockExe = Install-WireSock
-
-if (-not $SkipConf -and -not $ConfPath) {
-    $ConfPath = Select-ConfFile -InitialDir (Join-Path $env:USERPROFILE "Downloads")
+function Stop-AndRemoveTunnelService {
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($svc) {
+        if ($svc.Status -ne "Stopped") {
+            Write-Host "  Parando servico $ServiceName..." -ForegroundColor Cyan
+            Stop-Service -Name $ServiceName -Force
+            $svc.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(20))
+        }
+        $client = Find-WireSockClient
+        if ($client) {
+            & $client uninstall | Out-Null
+        } else {
+            & sc.exe delete $ServiceName | Out-Null
+        }
+        Write-Host "  Servico $ServiceName removido." -ForegroundColor Green
+    }
+    if (Test-Path $DataDir) {
+        Remove-Item -Path $DataDir -Recurse -Force
+        Write-Host "  Perfil removido de $DataDir." -ForegroundColor Green
+    }
 }
 
-if ($ConfPath -and (Test-Path $ConfPath)) {
-    Write-Host "[2/4] Isolando perfil WireGuard para Discord..." -ForegroundColor Green
-    $rawConf = Get-Content -Path $ConfPath -Raw -Encoding UTF8
-    $cleanConf = ConvertTo-DiscordWireSockConf -RawText $rawConf
-    [System.IO.File]::WriteAllText($TargetConf, $cleanConf, [System.Text.UTF8Encoding]::new($false))
+function Register-AndStartService {
+    param([string]$WireSockExe, [string]$ConfFile, [string]$StartupMode)
 
-    Write-Host "[3/4] Configurando e iniciando serviço '$ServiceName' ($Startup)..." -ForegroundColor Green
     $existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($existingSvc) {
         if ($existingSvc.Status -ne "Stopped") {
             Stop-Service -Name $ServiceName -Force
             $existingSvc.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(20))
         }
-        & $wireSockExe uninstall | Out-Null
+        & $WireSockExe uninstall | Out-Null
     }
 
-    $startTypeFlag = if ($Startup -eq "Automatic") { "2" } else { "3" }
-    & $wireSockExe install -start-type $startTypeFlag -config $TargetConf -log-level info -network-lock disabled
+    $startTypeFlag = if ($StartupMode -eq "Automatic") { "2" } else { "3" }
+    & $WireSockExe install -start-type $startTypeFlag -config $ConfFile -log-level info -network-lock disabled
     if ($LASTEXITCODE -ne 0) {
-        throw "Falha ao registrar o serviço WireSock."
+        throw "Falha ao registrar o servico WireSock."
     }
-    Set-Service -Name $ServiceName -StartupType $Startup
+    Set-Service -Name $ServiceName -StartupType $StartupMode
     Start-Service -Name $ServiceName
     (Get-Service -Name $ServiceName).WaitForStatus("Running", [TimeSpan]::FromSeconds(20))
-} else {
-    Write-Host "[2/4] Nenhum .conf selecionado agora — você poderá inserir direto nas configurações do plugin no Discord." -ForegroundColor Yellow
-    Write-Host "[3/4] Serviço será ativado assim que você escolher o .conf no plugin." -ForegroundColor Yellow
 }
 
-if (-not $SkipVencord) {
-    Write-Host "[4/4] Instalando plugin GoLiveOpen no Vencord..." -ForegroundColor Green
-    $vencordPath = Find-VencordCheckout -Hint $VencordDir
-    if ($vencordPath) {
-        $pluginDestDir = Join-Path $vencordPath "src\userplugins\goLiveOpen"
-        New-Item -ItemType Directory -Path $pluginDestDir -Force | Out-Null
+if (-not $Action) {
+    $Action = Show-Menu
+    if (-not $Action) { exit 0 }
+}
 
-        foreach ($fileName in @("index.tsx", "native.ts")) {
-            $localFile = Join-Path $PSScriptRoot "plugin\goLiveOpen\$fileName"
-            $destFile = Join-Path $pluginDestDir $fileName
-            if (Test-Path $localFile) {
-                Copy-Item -Path $localFile -Destination $destFile -Force
-            } else {
-                Invoke-WebRequest -Uri "$PluginBaseUrl/$fileName" -OutFile $destFile -UseBasicParsing
-            }
+if (-not (Test-IsAdmin)) {
+    if ($Action -eq "Install" -and -not $SkipConf -and -not $ConfPath) {
+        $ConfPath = Select-ConfFile -InitialDir (Join-Path $env:USERPROFILE "Downloads")
+    }
+
+    $argList = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", "`"$PSCommandPath`"",
+        "-Action", $Action,
+        "-Startup", $Startup
+    )
+    if ($ConfPath -and (Test-Path $ConfPath)) {
+        $argList += @("-ConfPath", "`"$((Resolve-Path $ConfPath).Path)`"")
+    } elseif ($Action -eq "Install") {
+        $argList += "-SkipConf"
+    }
+    if ($VencordDir) { $argList += @("-VencordDir", "`"$VencordDir`"") }
+    if ($SkipVencord) { $argList += "-SkipVencord" }
+
+    Write-Host "Solicitando permissao de administrador..." -ForegroundColor Cyan
+    $elevated = Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs -Wait -PassThru
+    exit $elevated.ExitCode
+}
+
+if ([Environment]::Is64BitOperatingSystem -eq $false) {
+    throw "Este script exige Windows 64-bit (x64)."
+}
+
+switch ($Action) {
+    "Install" {
+        New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+        # Permite que o usuario local atualize o discord.conf direto pelas configuracoes do Vencord
+        & icacls.exe $DataDir /grant "*S-1-5-32-545:(OI)(CI)M" | Out-Null
+
+        Write-Host "[1/4] Verificando WireSock SDK $WireSockVersion..." -ForegroundColor Green
+        $wireSockExe = Install-WireSock
+
+        if (-not $SkipConf -and -not $ConfPath) {
+            $ConfPath = Select-ConfFile -InitialDir (Join-Path $env:USERPROFILE "Downloads")
         }
 
-        if (Get-Command pnpm -ErrorAction SilentlyContinue) {
-            Push-Location $vencordPath
-            try {
-                & pnpm build --dev
-            } finally {
-                Pop-Location
-            }
+        if ($ConfPath -and (Test-Path $ConfPath)) {
+            Write-Host "[2/4] Isolando perfil WireGuard para Discord..." -ForegroundColor Green
+            $rawConf = Get-Content -Path $ConfPath -Raw -Encoding UTF8
+            $cleanConf = ConvertTo-DiscordWireSockConf -RawText $rawConf
+            [System.IO.File]::WriteAllText($TargetConf, $cleanConf, [System.Text.UTF8Encoding]::new($false))
+
+            Write-Host "[3/4] Configurando e iniciando servico '$ServiceName' ($Startup)..." -ForegroundColor Green
+            Register-AndStartService -WireSockExe $wireSockExe -ConfFile $TargetConf -StartupMode $Startup
         } else {
-            Write-Host "  Plugin copiado para $pluginDestDir. Rode 'pnpm build --dev' dentro de $vencordPath." -ForegroundColor Yellow
+            Write-Host "[2/4] Nenhum .conf selecionado agora — insira direto nas configuracoes do plugin no Discord." -ForegroundColor Yellow
+            Write-Host "[3/4] O servico sera ativado ao escolher o .conf no plugin." -ForegroundColor Yellow
         }
-    } else {
-        Write-Host "  Checkout do Vencord não encontrado automaticamente. Copie a pasta 'plugin\goLiveOpen' para 'src\userplugins\goLiveOpen' e rode 'pnpm build --dev'." -ForegroundColor Yellow
+
+        if (-not $SkipVencord) {
+            Write-Host "[4/4] Instalando plugin GoLiveOpen no Vencord..." -ForegroundColor Green
+            $vencordPath = Find-VencordCheckout -Hint $VencordDir
+            if ($vencordPath) {
+                Install-VencordPlugin -VencordPath $vencordPath
+            } else {
+                Write-Host "  Checkout do Vencord nao encontrado automaticamente. Copie 'plugin\goLiveOpen' para 'src\userplugins\goLiveOpen' e rode 'pnpm build --dev'." -ForegroundColor Yellow
+            }
+        }
+
+        Write-Host ""
+        Write-Host "Instalacao concluida! Ative 'GoLiveOpen' nas configuracoes do Vencord (Ctrl + R se o Discord ja estiver aberto)." -ForegroundColor Green
+    }
+
+    "Update" {
+        Write-Host "[1/3] Verificando WireSock SDK $WireSockVersion..." -ForegroundColor Green
+        $wireSockExe = Install-WireSock
+
+        Write-Host "[2/3] Atualizando plugin GoLiveOpen no Vencord..." -ForegroundColor Green
+        if (-not $SkipVencord) {
+            $vencordPath = Find-VencordCheckout -Hint $VencordDir
+            if ($vencordPath) {
+                Install-VencordPlugin -VencordPath $vencordPath -PreferRemote
+            } else {
+                Write-Host "  Checkout do Vencord nao encontrado." -ForegroundColor Yellow
+            }
+        }
+
+        Write-Host "[3/3] Verificando servico do tunel..." -ForegroundColor Green
+        if (Test-Path $TargetConf) {
+            Register-AndStartService -WireSockExe $wireSockExe -ConfFile $TargetConf -StartupMode $Startup
+        } else {
+            Write-Host "  Nenhum .conf salvo em $TargetConf ainda (use o botao no plugin)." -ForegroundColor Yellow
+        }
+
+        Write-Host ""
+        Write-Host "Atualizacao concluida! Pressione Ctrl + R no Discord." -ForegroundColor Green
+    }
+
+    "UninstallPlugin" {
+        Write-Host "[1/2] Removendo tunel do GoLiveOpen (mantendo WireSock)..." -ForegroundColor Green
+        Stop-AndRemoveTunnelService
+
+        Write-Host "[2/2] Removendo plugin GoLiveOpen do Vencord..." -ForegroundColor Green
+        if (-not $SkipVencord) {
+            $vencordPath = Find-VencordCheckout -Hint $VencordDir
+            if ($vencordPath) {
+                $pluginDestDir = Join-Path $vencordPath "src\userplugins\goLiveOpen"
+                if (Test-Path $pluginDestDir) {
+                    Remove-Item -Path $pluginDestDir -Recurse -Force
+                    Invoke-VencordBuild -VencordPath $vencordPath
+                }
+            }
+        }
+        Write-Host "Plugin e tunel removidos. O WireSock foi mantido no sistema." -ForegroundColor Green
+    }
+
+    "UninstallAll" {
+        Write-Host "[1/3] Removendo tunel do GoLiveOpen..." -ForegroundColor Green
+        Stop-AndRemoveTunnelService
+
+        Write-Host "[2/3] Removendo plugin GoLiveOpen do Vencord..." -ForegroundColor Green
+        if (-not $SkipVencord) {
+            $vencordPath = Find-VencordCheckout -Hint $VencordDir
+            if ($vencordPath) {
+                $pluginDestDir = Join-Path $vencordPath "src\userplugins\goLiveOpen"
+                if (Test-Path $pluginDestDir) {
+                    Remove-Item -Path $pluginDestDir -Recurse -Force
+                    Invoke-VencordBuild -VencordPath $vencordPath
+                }
+            }
+        }
+
+        Write-Host "[3/3] Desinstalando WireSock Secure Connect..." -ForegroundColor Green
+        Uninstall-WireSockPackage
+        Write-Host "Desinstalacao completa concluida." -ForegroundColor Green
     }
 }
-
-Write-Host ""
-Write-Host "Pronto! Abra as configurações do Vencord e ative 'GoLiveOpen'." -ForegroundColor Green
-Write-Host "Se o Discord já estiver aberto, pressione Ctrl + R uma vez." -ForegroundColor Cyan
