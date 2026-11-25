@@ -8,6 +8,7 @@ import { definePluginSettings } from "@api/Settings";
 import { Button } from "@components/Button";
 import { Card } from "@components/Card";
 import ErrorBoundary from "@components/ErrorBoundary";
+import { Flex } from "@components/Flex";
 import { Heading } from "@components/Heading";
 import { Link } from "@components/Link";
 import { Margins } from "@components/margins";
@@ -200,8 +201,8 @@ const settings = definePluginSettings({
 function AboutPlugin() {
     const status = getGatewayRouteStatus();
     const [tunnel, setTunnel] = useState<TunnelStatus | null>(null);
-    const [busy, setBusy] = useState(false);
-    const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+    const [busyAction, setBusyAction] = useState<"conf" | "toggle" | null>(null);
+    const [feedback, setFeedback] = useState<string | null>(null);
 
     const refreshTunnel = async () => {
         if (!Native?.getTunnelStatus) return;
@@ -217,25 +218,45 @@ function AboutPlugin() {
     }, []);
 
     const handlePickConf = async () => {
-        if (!Native?.selectAndApplyConf || busy) return;
-        setBusy(true);
+        if (!Native?.selectAndApplyConf || busyAction) return;
+        setBusyAction("conf");
         setFeedback(null);
         try {
             const result = await Native.selectAndApplyConf();
             if (result.cancelled) return;
             if (!result.ok) {
-                setFeedback({ kind: "err", text: result.error || "Não foi possível aplicar o arquivo .conf." });
+                setFeedback(result.error || "Não foi possível aplicar o arquivo .conf.");
                 return;
             }
-            setFeedback({
-                kind: "ok",
-                text: `Arquivo aplicado (${result.endpoint ?? "ok"}). Pressione Ctrl + R para o Discord reconhecer a nova rota.`
-            });
+            setFeedback(`Arquivo aplicado (${result.endpoint ?? "ok"}). Pressione Ctrl + R para o Discord reconhecer a nova rota.`);
             await refreshTunnel();
         } catch (error) {
-            setFeedback({ kind: "err", text: error instanceof Error ? error.message : String(error) });
+            setFeedback(error instanceof Error ? error.message : String(error));
         } finally {
-            setBusy(false);
+            setBusyAction(null);
+        }
+    };
+
+    const handleToggleTunnel = async () => {
+        if (!Native?.toggleTunnel || busyAction) return;
+        setBusyAction("toggle");
+        setFeedback(null);
+        try {
+            const result = await Native.toggleTunnel();
+            if (!result.ok) {
+                setFeedback(result.error || "Não foi possível alterar o estado do túnel.");
+                return;
+            }
+            setFeedback(
+                result.running
+                    ? "Túnel ativado. Se o Discord já estava aberto, pressione Ctrl + R."
+                    : "Túnel pausado. Pressione Ctrl + R para voltar à conexão direta."
+            );
+            await refreshTunnel();
+        } catch (error) {
+            setFeedback(error instanceof Error ? error.message : String(error));
+        } finally {
+            setBusyAction(null);
         }
     };
 
@@ -271,20 +292,34 @@ function AboutPlugin() {
                         {!tunnel.wireSockInstalled
                             ? "WireSock não encontrado no Windows. Rode o instalador Install-GoLiveOpen.ps1 uma vez primeiro."
                             : tunnel.confConfigured
-                                ? `Túnel ${tunnel.serviceRunning ? "ativo" : "parado"} · Endpoint: ${tunnel.endpoint ?? "configurado"}`
+                                ? `Túnel ${tunnel.serviceRunning ? "ativo" : "pausado"} · Endpoint: ${tunnel.endpoint ?? "configurado"}`
                                 : "Nenhum .conf configurado ainda."}
                     </Paragraph>
                 )}
-                <div className={Margins.top8}>
+                <Flex gap="8px" flexWrap="wrap" className={Margins.top8}>
                     <Button
                         variant="primary"
                         size="small"
-                        disabled={busy || !Native?.selectAndApplyConf}
+                        disabled={busyAction !== null || !Native?.selectAndApplyConf}
                         onClick={handlePickConf}
                     >
-                        {busy ? "Aplicando .conf..." : "Inserir arquivo .conf"}
+                        {busyAction === "conf"
+                            ? "Aplicando .conf..."
+                            : tunnel?.confConfigured ? "Trocar arquivo .conf" : "Inserir arquivo .conf"}
                     </Button>
-                </div>
+                    {tunnel?.wireSockInstalled && tunnel.confConfigured && (
+                        <Button
+                            variant={tunnel.serviceRunning ? "secondary" : "positive"}
+                            size="small"
+                            disabled={busyAction !== null || !Native?.toggleTunnel}
+                            onClick={handleToggleTunnel}
+                        >
+                            {busyAction === "toggle"
+                                ? "Aguarde..."
+                                : tunnel.serviceRunning ? "Pausar túnel" : "Ativar túnel"}
+                        </Button>
+                    )}
+                </Flex>
                 <Paragraph className={Margins.top8}>
                     Você pode criar e baixar um .conf gratuito aqui:{" "}
                     <Link href="https://account.protonvpn.com/downloads">account.protonvpn.com/downloads</Link>{" "}
@@ -292,7 +327,7 @@ function AboutPlugin() {
                 </Paragraph>
                 {feedback && (
                     <Paragraph className={Margins.top8}>
-                        {feedback.text}
+                        {feedback}
                     </Paragraph>
                 )}
             </Card>

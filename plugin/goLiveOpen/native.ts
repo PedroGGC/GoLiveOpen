@@ -23,9 +23,10 @@ export interface TunnelStatus {
     endpoint: string | null;
 }
 
-export interface ApplyConfResult {
+export interface TunnelActionResult {
     ok: boolean;
     cancelled?: boolean;
+    running?: boolean;
     endpoint?: string | null;
     error?: string;
 }
@@ -91,30 +92,14 @@ function psSingleQuote(value: string): string {
     return `'${value.replace(/'/g, "''")}'`;
 }
 
-async function applyWithElevation(wireSockExe: string, stagedConfPath: string): Promise<void> {
-    const script = [
-        "$ErrorActionPreference = 'Stop'",
-        `New-Item -ItemType Directory -Path ${psSingleQuote(DATA_DIR)} -Force | Out-Null`,
-        `Copy-Item -Path ${psSingleQuote(stagedConfPath)} -Destination ${psSingleQuote(TARGET_CONF)} -Force`,
-        `$svc = Get-Service -Name ${psSingleQuote(SERVICE_NAME)} -ErrorAction SilentlyContinue`,
-        "if ($svc) {",
-        "  if ($svc.Status -ne 'Stopped') { Stop-Service -Name $svc.Name -Force; $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) }",
-        `  & ${psSingleQuote(wireSockExe)} uninstall | Out-Null`,
-        "}",
-        `& ${psSingleQuote(wireSockExe)} install -start-type 2 -config ${psSingleQuote(TARGET_CONF)} -log-level info -network-lock disabled`,
-        "if ($LASTEXITCODE -ne 0) { throw 'Falha ao configurar o serviço WireSock.' }",
-        `Set-Service -Name ${psSingleQuote(SERVICE_NAME)} -StartupType Automatic`,
-        `Start-Service -Name ${psSingleQuote(SERVICE_NAME)}`,
-        `(Get-Service -Name ${psSingleQuote(SERVICE_NAME)}).WaitForStatus('Running', [TimeSpan]::FromSeconds(20))`,
-    ].join("\n");
-
-    const encodedInner = Buffer.from(script, "utf16le").toString("base64");
+async function runElevatedPowerShell(scriptLines: string[], errorMessage: string): Promise<void> {
+    const encodedInner = Buffer.from(scriptLines.join("\n"), "utf16le").toString("base64");
     const wrapper = `$p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','${encodedInner}'; exit $p.ExitCode`;
     const encodedWrapper = Buffer.from(wrapper, "utf16le").toString("base64");
 
     const res = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodedWrapper], 45_000);
     if (res.code !== 0) {
-        throw new Error("Permissão cancelada ou falha ao reiniciar o serviço WireSock.");
+        throw new Error(errorMessage);
     }
 }
 
@@ -146,7 +131,7 @@ export async function getTunnelStatus(_: IpcMainInvokeEvent): Promise<TunnelStat
     return { supported: true, wireSockInstalled, serviceRunning, confConfigured, endpoint };
 }
 
-export async function selectAndApplyConf(event: IpcMainInvokeEvent): Promise<ApplyConfResult> {
+export async function selectAndApplyConf(event: IpcMainInvokeEvent): Promise<TunnelActionResult> {
     if (process.platform !== "win32") {
         return { ok: false, error: "Disponível apenas para Windows." };
     }
@@ -176,17 +161,15 @@ export async function selectAndApplyConf(event: IpcMainInvokeEvent): Promise<App
         const raw = fs.readFileSync(picked.filePaths[0], "utf8");
         const { text, endpoint } = sanitizeWireGuardConf(raw);
 
-        // Tenta atualizar direto e reiniciar sem UAC se já houver permissão; se precisar de elevação, pede uma vez só no clique.
         try {
             fs.mkdirSync(DATA_DIR, { recursive: true });
             fs.writeFileSync(TARGET_CONF, text, "utf8");
-            const svc = await execFileAsync("sc.exe", ["query", SERVICE_NAME], 5_000);
-            if (svc.code === 0 && /\b4\s+RUNNING\b/i.test(svc.stdout)) {
+            if (await isServiceRunning()) {
                 const stopRes = await execFileAsync("sc.exe", ["stop", SERVICE_NAME], 15_000);
                 if (stopRes.code === 0) {
                     await new Promise(r => setTimeout(r, 1_500));
                     const startRes = await execFileAsync("sc.exe", ["start", SERVICE_NAME], 15_000);
-                    if (startRes.code === 0) return { ok: true, endpoint };
+                    if (startRes.code === 0) return { ok: true, running: true, endpoint };
                 }
             }
         } catch {
@@ -194,11 +177,61 @@ export async function selectAndApplyConf(event: IpcMainInvokeEvent): Promise<App
         }
 
         fs.writeFileSync(stagedPath, text, "utf8");
-        await applyWithElevation(wireSockExe, stagedPath);
-        return { ok: true, endpoint };
+        await runElevatedPowerShell([
+            "$ErrorActionPreference = 'Stop'",
+            `New-Item -ItemType Directory -Path ${psSingleQuote(DATA_DIR)} -Force | Out-Null`,
+            `Copy-Item -Path ${psSingleQuote(stagedPath)} -Destination ${psSingleQuote(TARGET_CONF)} -Force`,
+            `$svc = Get-Service -Name ${psSingleQuote(SERVICE_NAME)} -ErrorAction SilentlyContinue`,
+            "if ($svc) {",
+            "  if ($svc.Status -ne 'Stopped') { Stop-Service -Name $svc.Name -Force; $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) }",
+            `  & ${psSingleQuote(wireSockExe)} uninstall | Out-Null`,
+            "}",
+            `& ${psSingleQuote(wireSockExe)} install -start-type 2 -config ${psSingleQuote(TARGET_CONF)} -log-level info -network-lock disabled`,
+            "if ($LASTEXITCODE -ne 0) { throw 'Falha ao configurar o serviço WireSock.' }",
+            `Set-Service -Name ${psSingleQuote(SERVICE_NAME)} -StartupType Automatic`,
+            `Start-Service -Name ${psSingleQuote(SERVICE_NAME)}`,
+            `(Get-Service -Name ${psSingleQuote(SERVICE_NAME)}).WaitForStatus('Running', [TimeSpan]::FromSeconds(20))`,
+        ], "Permissão cancelada ou falha ao reiniciar o serviço WireSock.");
+
+        return { ok: true, running: true, endpoint };
     } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
     } finally {
         fs.rmSync(stagedPath, { force: true });
+    }
+}
+
+export async function toggleTunnel(_: IpcMainInvokeEvent): Promise<TunnelActionResult> {
+    if (process.platform !== "win32") {
+        return { ok: false, error: "Disponível apenas para Windows." };
+    }
+    if (!findWireSockClient()) {
+        return { ok: false, error: "WireSock não está instalado. Rode o Install-GoLiveOpen.ps1 uma vez primeiro." };
+    }
+    if (!fs.existsSync(TARGET_CONF)) {
+        return { ok: false, error: "Nenhum arquivo .conf configurado ainda." };
+    }
+
+    try {
+        const wasRunning = await isServiceRunning();
+        const action = wasRunning ? "stop" : "start";
+        const directRes = await execFileAsync("sc.exe", [action, SERVICE_NAME], 15_000);
+        if (directRes.code === 0) {
+            await new Promise(r => setTimeout(r, 800));
+            return { ok: true, running: await isServiceRunning() };
+        }
+
+        const psCmd = wasRunning
+            ? `Stop-Service -Name ${psSingleQuote(SERVICE_NAME)} -Force; (Get-Service -Name ${psSingleQuote(SERVICE_NAME)}).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))`
+            : `Start-Service -Name ${psSingleQuote(SERVICE_NAME)}; (Get-Service -Name ${psSingleQuote(SERVICE_NAME)}).WaitForStatus('Running', [TimeSpan]::FromSeconds(20))`;
+
+        await runElevatedPowerShell([
+            "$ErrorActionPreference = 'Stop'",
+            psCmd,
+        ], "Permissão cancelada ou falha ao alterar o estado do túnel.");
+
+        return { ok: true, running: await isServiceRunning() };
+    } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
 }

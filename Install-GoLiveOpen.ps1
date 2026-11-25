@@ -4,6 +4,8 @@ param(
     [string]$Action = "",
     [string]$ConfPath = "",
     [string]$VencordDir = "",
+    [string]$UserAppData = "",
+    [string]$UserLocalAppData = "",
     [ValidateSet("Automatic", "Manual")]
     [string]$Startup = "Automatic",
     [switch]$SkipConf,
@@ -18,7 +20,14 @@ $WireSockSha256 = "3fa1ca6e595ff64ee638ccda8c14c8c5c6b65099130c4345f94464bcc3a04
 $ServiceName = "wiresock-client-service"
 $DataDir = Join-Path $env:ProgramData "GoLiveOpen"
 $TargetConf = Join-Path $DataDir "discord.conf"
-$PluginBaseUrl = "https://raw.githubusercontent.com/PedroGGC/GoLiveOpen/main/plugin/goLiveOpen"
+
+$RepoRawBase = "https://raw.githubusercontent.com/PedroGGC/GoLiveOpen/main/plugin/goLiveOpen"
+$ReleaseDistUrl = "https://github.com/PedroGGC/GoLiveOpen/releases/latest/download/vencord-goliveopen-dist.zip"
+$ReleaseShaUrl = "https://github.com/PedroGGC/GoLiveOpen/releases/latest/download/vencord-goliveopen-dist.zip.sha256"
+$VencordInstallerUrl = "https://github.com/Vencord/Installer/releases/latest/download/VencordInstallerCli.exe"
+
+if (-not $UserAppData) { $UserAppData = $env:APPDATA }
+if (-not $UserLocalAppData) { $UserLocalAppData = $env:LOCALAPPDATA }
 
 function Test-IsAdmin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -29,7 +38,7 @@ function Test-IsAdmin {
 function Show-Menu {
     Write-Host ""
     Write-Host "=== GoLiveOpen ===" -ForegroundColor Cyan
-    Write-Host "  [1] Instalar / Reinstalar tudo (WireSock + tunel + plugin Vencord)"
+    Write-Host "  [1] Instalar / Reinstalar tudo (WireSock + tunel + Vencord com GoLiveOpen)"
     Write-Host "  [2] Atualizar plugin e servico"
     Write-Host "  [3] Desinstalar apenas o plugin e o tunel (mantem o WireSock)"
     Write-Host "  [4] Desinstalar tudo (plugin, tunel e WireSock)"
@@ -201,10 +210,6 @@ function Find-VencordCheckout {
 function Invoke-VencordBuild {
     param([string]$VencordPath)
 
-    if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
-        Write-Host "  pnpm nao encontrado; rode 'pnpm build --dev' manualmente em $VencordPath." -ForegroundColor Yellow
-        return
-    }
     Push-Location $VencordPath
     try {
         & pnpm build --dev
@@ -213,7 +218,7 @@ function Invoke-VencordBuild {
     }
 }
 
-function Install-VencordPlugin {
+function Install-VencordSourcePlugin {
     param([string]$VencordPath, [switch]$PreferRemote)
 
     $pluginDestDir = Join-Path $VencordPath "src\userplugins\goLiveOpen"
@@ -225,10 +230,75 @@ function Install-VencordPlugin {
         if (-not $PreferRemote -and (Test-Path $localFile)) {
             Copy-Item -Path $localFile -Destination $destFile -Force
         } else {
-            Invoke-WebRequest -Uri "$PluginBaseUrl/$fileName" -OutFile $destFile -UseBasicParsing
+            Invoke-WebRequest -Uri "$RepoRawBase/$fileName" -OutFile $destFile -UseBasicParsing
         }
     }
     Invoke-VencordBuild -VencordPath $VencordPath
+}
+
+function Stop-DiscordForPatch {
+    $procs = Get-Process -Name "Discord" -ErrorAction SilentlyContinue
+    if (-not $procs) { return $false }
+    Write-Host "  Fechando Discord para aplicar o Vencord..." -ForegroundColor Cyan
+    $procs | Stop-Process -Force
+    Start-Sleep -Seconds 1
+    return $true
+}
+
+function Start-DiscordIfAvailable {
+    $updateExe = Join-Path $UserLocalAppData "Discord\Update.exe"
+    if (Test-Path $updateExe) {
+        Start-Process -FilePath $updateExe -ArgumentList @("--processStart", "Discord.exe") | Out-Null
+    }
+}
+
+function Get-VencordInstallerCli {
+    $cliPath = Join-Path $env:TEMP "VencordInstallerCli.exe"
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Write-Host "  Baixando instalador oficial do Vencord..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri $VencordInstallerUrl -OutFile $cliPath -UseBasicParsing
+    return $cliPath
+}
+
+function Install-VencordPrebuilt {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $zipPath = Join-Path $env:TEMP "vencord-goliveopen-dist.zip"
+    $shaPath = Join-Path $env:TEMP "vencord-goliveopen-dist.zip.sha256"
+
+    Write-Host "  Baixando pacote pre-compilado do GoLiveOpen..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri $ReleaseDistUrl -OutFile $zipPath -UseBasicParsing
+    Invoke-WebRequest -Uri $ReleaseShaUrl -OutFile $shaPath -UseBasicParsing
+
+    $expectedHash = ((Get-Content $shaPath -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+    $actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($expectedHash -ne $actualHash) {
+        Remove-Item $zipPath, $shaPath -Force -ErrorAction SilentlyContinue
+        throw "SHA-256 do pacote pre-compilado nao confere (esperado $expectedHash, obtido $actualHash)."
+    }
+
+    $wasRunning = Stop-DiscordForPatch
+    $vencordData = Join-Path $UserAppData "Vencord"
+    $distDir = Join-Path $vencordData "dist"
+    $backupDir = Join-Path $vencordData "dist.goliveopen-bak"
+
+    $cliPath = Get-VencordInstallerCli
+    try {
+        # Garante que o Discord esteja injetado pelo instalador oficial do Vencord
+        $env:VENCORD_USER_DATA_DIR = $vencordData
+        & $cliPath -install -branch auto | Out-Null
+    } finally {
+        Remove-Item Env:VENCORD_USER_DATA_DIR -ErrorAction SilentlyContinue
+        Remove-Item $cliPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if ((Test-Path $distDir) -and -not (Test-Path $backupDir)) {
+        Copy-Item -Path $distDir -Destination $backupDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+    Expand-Archive -Path $zipPath -DestinationPath $distDir -Force
+    Remove-Item $zipPath, $shaPath -Force -ErrorAction SilentlyContinue
+
+    if ($wasRunning) { Start-DiscordIfAvailable }
 }
 
 function Stop-AndRemoveTunnelService {
@@ -275,6 +345,28 @@ function Register-AndStartService {
     (Get-Service -Name $ServiceName).WaitForStatus("Running", [TimeSpan]::FromSeconds(20))
 }
 
+function Remove-VencordIntegration {
+    $vencordPath = Find-VencordCheckout -Hint $VencordDir
+    if ($vencordPath -and (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+        $pluginDestDir = Join-Path $vencordPath "src\userplugins\goLiveOpen"
+        if (Test-Path $pluginDestDir) {
+            Remove-Item -Path $pluginDestDir -Recurse -Force
+            Invoke-VencordBuild -VencordPath $vencordPath
+        }
+        return
+    }
+
+    $vencordData = Join-Path $UserAppData "Vencord"
+    $distDir = Join-Path $vencordData "dist"
+    $backupDir = Join-Path $vencordData "dist.goliveopen-bak"
+    if (Test-Path $backupDir) {
+        $wasRunning = Stop-DiscordForPatch
+        Remove-Item -Path $distDir -Recurse -Force -ErrorAction SilentlyContinue
+        Move-Item -Path $backupDir -Destination $distDir -Force
+        if ($wasRunning) { Start-DiscordIfAvailable }
+    }
+}
+
 if (-not $Action) {
     $Action = Show-Menu
     if (-not $Action) { exit 0 }
@@ -284,12 +376,18 @@ if (-not (Test-IsAdmin)) {
     if ($Action -eq "Install" -and -not $SkipConf -and -not $ConfPath) {
         $ConfPath = Select-ConfFile -InitialDir (Join-Path $env:USERPROFILE "Downloads")
     }
+    if (-not $VencordDir) {
+        $detected = Find-VencordCheckout -Hint ""
+        if ($detected) { $VencordDir = $detected }
+    }
 
     $argList = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", "`"$PSCommandPath`"",
         "-Action", $Action,
-        "-Startup", $Startup
+        "-Startup", $Startup,
+        "-UserAppData", "`"$UserAppData`"",
+        "-UserLocalAppData", "`"$UserLocalAppData`""
     )
     if ($ConfPath -and (Test-Path $ConfPath)) {
         $argList += @("-ConfPath", "`"$((Resolve-Path $ConfPath).Path)`"")
@@ -311,7 +409,6 @@ if ([Environment]::Is64BitOperatingSystem -eq $false) {
 switch ($Action) {
     "Install" {
         New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
-        # Permite que o usuario local atualize o discord.conf direto pelas configuracoes do Vencord
         & icacls.exe $DataDir /grant "*S-1-5-32-545:(OI)(CI)M" | Out-Null
 
         Write-Host "[1/4] Verificando WireSock SDK $WireSockVersion..." -ForegroundColor Green
@@ -335,30 +432,30 @@ switch ($Action) {
         }
 
         if (-not $SkipVencord) {
-            Write-Host "[4/4] Instalando plugin GoLiveOpen no Vencord..." -ForegroundColor Green
+            Write-Host "[4/4] Instalando Vencord com GoLiveOpen..." -ForegroundColor Green
             $vencordPath = Find-VencordCheckout -Hint $VencordDir
-            if ($vencordPath) {
-                Install-VencordPlugin -VencordPath $vencordPath
+            if ($vencordPath -and (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+                Install-VencordSourcePlugin -VencordPath $vencordPath
             } else {
-                Write-Host "  Checkout do Vencord nao encontrado automaticamente. Copie 'plugin\goLiveOpen' para 'src\userplugins\goLiveOpen' e rode 'pnpm build --dev'." -ForegroundColor Yellow
+                Install-VencordPrebuilt
             }
         }
 
         Write-Host ""
-        Write-Host "Instalacao concluida! Ative 'GoLiveOpen' nas configuracoes do Vencord (Ctrl + R se o Discord ja estiver aberto)." -ForegroundColor Green
+        Write-Host "Instalacao concluida! Abra Configuracoes do Vencord > Plugins e ative 'GoLiveOpen'." -ForegroundColor Green
     }
 
     "Update" {
         Write-Host "[1/3] Verificando WireSock SDK $WireSockVersion..." -ForegroundColor Green
         $wireSockExe = Install-WireSock
 
-        Write-Host "[2/3] Atualizando plugin GoLiveOpen no Vencord..." -ForegroundColor Green
         if (-not $SkipVencord) {
+            Write-Host "[2/3] Atualizando Vencord com GoLiveOpen..." -ForegroundColor Green
             $vencordPath = Find-VencordCheckout -Hint $VencordDir
-            if ($vencordPath) {
-                Install-VencordPlugin -VencordPath $vencordPath -PreferRemote
+            if ($vencordPath -and (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+                Install-VencordSourcePlugin -VencordPath $vencordPath -PreferRemote
             } else {
-                Write-Host "  Checkout do Vencord nao encontrado." -ForegroundColor Yellow
+                Install-VencordPrebuilt
             }
         }
 
@@ -370,23 +467,16 @@ switch ($Action) {
         }
 
         Write-Host ""
-        Write-Host "Atualizacao concluida! Pressione Ctrl + R no Discord." -ForegroundColor Green
+        Write-Host "Atualizacao concluida!" -ForegroundColor Green
     }
 
     "UninstallPlugin" {
         Write-Host "[1/2] Removendo tunel do GoLiveOpen (mantendo WireSock)..." -ForegroundColor Green
         Stop-AndRemoveTunnelService
 
-        Write-Host "[2/2] Removendo plugin GoLiveOpen do Vencord..." -ForegroundColor Green
         if (-not $SkipVencord) {
-            $vencordPath = Find-VencordCheckout -Hint $VencordDir
-            if ($vencordPath) {
-                $pluginDestDir = Join-Path $vencordPath "src\userplugins\goLiveOpen"
-                if (Test-Path $pluginDestDir) {
-                    Remove-Item -Path $pluginDestDir -Recurse -Force
-                    Invoke-VencordBuild -VencordPath $vencordPath
-                }
-            }
+            Write-Host "[2/2] Removendo plugin GoLiveOpen do Vencord..." -ForegroundColor Green
+            Remove-VencordIntegration
         }
         Write-Host "Plugin e tunel removidos. O WireSock foi mantido no sistema." -ForegroundColor Green
     }
@@ -395,16 +485,9 @@ switch ($Action) {
         Write-Host "[1/3] Removendo tunel do GoLiveOpen..." -ForegroundColor Green
         Stop-AndRemoveTunnelService
 
-        Write-Host "[2/3] Removendo plugin GoLiveOpen do Vencord..." -ForegroundColor Green
         if (-not $SkipVencord) {
-            $vencordPath = Find-VencordCheckout -Hint $VencordDir
-            if ($vencordPath) {
-                $pluginDestDir = Join-Path $vencordPath "src\userplugins\goLiveOpen"
-                if (Test-Path $pluginDestDir) {
-                    Remove-Item -Path $pluginDestDir -Recurse -Force
-                    Invoke-VencordBuild -VencordPath $vencordPath
-                }
-            }
+            Write-Host "[2/3] Removendo plugin GoLiveOpen do Vencord..." -ForegroundColor Green
+            Remove-VencordIntegration
         }
 
         Write-Host "[3/3] Desinstalando WireSock Secure Connect..." -ForegroundColor Green
