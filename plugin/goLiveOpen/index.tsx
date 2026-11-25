@@ -5,6 +5,7 @@
  */
 
 import { definePluginSettings } from "@api/Settings";
+import { Button } from "@components/Button";
 import { Card } from "@components/Card";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { Heading } from "@components/Heading";
@@ -13,9 +14,11 @@ import { Margins } from "@components/margins";
 import { Paragraph } from "@components/Paragraph";
 import { Logger } from "@utils/Logger";
 import { useAwaiter } from "@utils/react";
-import definePlugin, { OptionType } from "@utils/types";
+import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import { findStoreLazy } from "@webpack";
-import { Constants, React, RestAPI, SearchableSelect, UserStore } from "@webpack/common";
+import { Constants, React, RestAPI, SearchableSelect, UserStore, useEffect, useState } from "@webpack/common";
+
+import type { TunnelStatus } from "./native";
 
 interface RegionStore {
     getPreferredRegion(): string | null;
@@ -35,6 +38,7 @@ interface ApexExperiments {
     getServerAssignment(kind: string, unitId: string, name: string): unknown;
 }
 
+const Native = VencordNative?.pluginHelpers?.GoLiveOpen as PluginNative<typeof import("./native")> | undefined;
 const RTCRegionStore: RegionStore = findStoreLazy("RTCRegionStore");
 const ApexExperimentStore: ApexExperiments = findStoreLazy("ApexExperimentStore");
 
@@ -195,6 +199,45 @@ const settings = definePluginSettings({
 
 function AboutPlugin() {
     const status = getGatewayRouteStatus();
+    const [tunnel, setTunnel] = useState<TunnelStatus | null>(null);
+    const [busy, setBusy] = useState(false);
+    const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+    const refreshTunnel = async () => {
+        if (!Native?.getTunnelStatus) return;
+        try {
+            setTunnel(await Native.getTunnelStatus());
+        } catch {
+            // Sem ponte nativa disponível (ex.: Discord Web)
+        }
+    };
+
+    useEffect(() => {
+        void refreshTunnel();
+    }, []);
+
+    const handlePickConf = async () => {
+        if (!Native?.selectAndApplyConf || busy) return;
+        setBusy(true);
+        setFeedback(null);
+        try {
+            const result = await Native.selectAndApplyConf();
+            if (result.cancelled) return;
+            if (!result.ok) {
+                setFeedback({ kind: "err", text: result.error || "Não foi possível aplicar o arquivo .conf." });
+                return;
+            }
+            setFeedback({
+                kind: "ok",
+                text: `Arquivo aplicado (${result.endpoint ?? "ok"}). Pressione Ctrl + R para o Discord reconhecer a nova rota.`
+            });
+            await refreshTunnel();
+        } catch (error) {
+            setFeedback({ kind: "err", text: error instanceof Error ? error.message : String(error) });
+        } finally {
+            setBusy(false);
+        }
+    };
 
     const statusConfig = {
         clear: {
@@ -205,7 +248,7 @@ function AboutPlugin() {
         blocked: {
             variant: "warning" as const,
             title: "Discord ainda detectando IP do Brasil",
-            text: "Os botões continuam visíveis na interface, mas o servidor ainda vê um IP brasileiro. Ative o túnel apenas para o Discord (TunnlTo ou WireSock) e recarregue com Ctrl + R."
+            text: "Os botões continuam visíveis na interface, mas o servidor ainda vê um IP brasileiro. Insira seu .conf abaixo e recarregue com Ctrl + R."
         },
         unknown: {
             variant: "info" as const,
@@ -221,21 +264,43 @@ function AboutPlugin() {
                 <Paragraph className={Margins.top8}>{statusConfig.text}</Paragraph>
             </Card>
 
+            <Card variant="normal" defaultPadding className={Margins.bottom16}>
+                <Heading tag="h5">Arquivo WireGuard (.conf)</Heading>
+                {tunnel?.supported && (
+                    <Paragraph className={Margins.top8}>
+                        {!tunnel.wireSockInstalled
+                            ? "WireSock não encontrado no Windows. Rode o instalador Install-GoLiveOpen.ps1 uma vez primeiro."
+                            : tunnel.confConfigured
+                                ? `Túnel ${tunnel.serviceRunning ? "ativo" : "parado"} · Endpoint: ${tunnel.endpoint ?? "configurado"}`
+                                : "Nenhum .conf configurado ainda."}
+                    </Paragraph>
+                )}
+                <div className={Margins.top8}>
+                    <Button
+                        variant="primary"
+                        size="small"
+                        disabled={busy || !Native?.selectAndApplyConf}
+                        onClick={handlePickConf}
+                    >
+                        {busy ? "Aplicando .conf..." : "Inserir arquivo .conf"}
+                    </Button>
+                </div>
+                <Paragraph className={Margins.top8}>
+                    Você pode criar e baixar um .conf gratuito aqui:{" "}
+                    <Link href="https://account.protonvpn.com/downloads">account.protonvpn.com/downloads</Link>{" "}
+                    (em WireGuard configuration).
+                </Paragraph>
+                {feedback && (
+                    <Paragraph className={Margins.top8}>
+                        {feedback.text}
+                    </Paragraph>
+                )}
+            </Card>
+
             <Card variant="normal">
-                <Heading tag="h5">Configuração limpa recomendada (sem PowerShell e sem lag em jogos)</Heading>
+                <Heading tag="h5">Como funciona (zero impacto nos jogos)</Heading>
                 <Paragraph className={Margins.top8}>
-                    1. Crie ou acesse sua conta gratuita em{" "}
-                    <Link href="https://account.protonvpn.com/downloads">account.protonvpn.com</Link>{" "}
-                    e baixe um arquivo <strong>WireGuard (.conf)</strong> (ex.: servidor gratuito dos EUA).
-                </Paragraph>
-                <Paragraph className={Margins.top8}>
-                    2. Instale uma única vez o{" "}
-                    <Link href="https://tunnl.to">TunnlTo</Link> ou o{" "}
-                    <Link href="https://www.wiresock.net">WireSock Secure Connect</Link>, importe o arquivo{" "}
-                    <code>.conf</code> e ative o filtro de aplicativo apenas para <code>Discord.exe</code> (e <code>Update.exe</code>).
-                </Paragraph>
-                <Paragraph className={Margins.top8}>
-                    3. Mantenha o túnel ligado quando for usar o Discord: seus jogos e navegador continuam na conexão direta normal, sem precisar desligar VPN para jogar.
+                    O túnel roteia apenas <code>Discord.exe</code> e <code>Update.exe</code> pelo WireSock, sem alterar o DNS do Windows nem o ping dos seus jogos. Depois da primeira configuração, não abre PowerShell nem pede reinício ao abrir o Discord.
                 </Paragraph>
             </Card>
         </div>
@@ -244,7 +309,7 @@ function AboutPlugin() {
 
 export default definePlugin({
     name: "GoLiveOpen",
-    description: "Remove o bloqueio visual do Go Live/câmera e permite escolher regiões de voz e transmissão para uso com split tunneling externo.",
+    description: "Remove o bloqueio visual do Go Live/câmera e aplica um .conf WireGuard isolado apenas para o Discord.",
     authors: [{ name: "Local", id: 0n }],
     tags: ["Voice", "Utility"],
     settings,
