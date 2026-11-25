@@ -1,6 +1,6 @@
 # GoLiveOpen
 
-Plugin simples para o **Vencord** que libera **Go Live**, câmera e seleção de região no Discord, isolando apenas o tráfego do Discord via **WireSock** para não afetar o ping dos seus jogos.
+Plugin simples para o **Vencord** que libera **Go Live**, câmera e seleção de região no Discord, isolando apenas o tráfego do Discord via **WireSock**.
 
 ---
 
@@ -11,9 +11,6 @@ Plugin simples para o **Vencord** que libera **Go Live**, câmera e seleção de
 - **Discord** para desktop com o **Vencord já instalado e configurado** ([vencord.dev](https://vencord.dev))
 - **Conta gratuita na ProtonVPN** (ou outro provedor WireGuard) para baixar um arquivo `.conf`
 - *Não precisa de Node.js, Git nem pnpm.*
-
-### Apenas para quem quiser compilar do código-fonte
-- **Node.js** + **pnpm** + checkout local do **Vencord**
 
 ---
 

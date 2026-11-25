@@ -61,6 +61,21 @@ function readEndpoint(raw: string): string | null {
     return match ? match[1].trim() : null;
 }
 
+function resolveDiscordAllowedApps(): string {
+    const apps = new Set<string>();
+    const exe = path.resolve(process.execPath);
+    if (/discord\.exe$/i.test(exe) && fs.existsSync(exe)) {
+        apps.add(exe);
+        const updater = path.join(path.dirname(path.dirname(exe)), "Update.exe");
+        if (fs.existsSync(updater)) apps.add(updater);
+    }
+    if (apps.size === 0) {
+        apps.add("Discord.exe");
+        apps.add("Update.exe");
+    }
+    return [...apps].join(", ");
+}
+
 function sanitizeWireGuardConf(raw: string): { text: string; endpoint: string } {
     if (!/^\s*\[Interface\]\s*$/im.test(raw) || !/^\s*\[Peer\]\s*$/im.test(raw)) {
         throw new Error("Arquivo .conf inválido: faltam seções [Interface] ou [Peer].");
@@ -84,7 +99,7 @@ function sanitizeWireGuardConf(raw: string): { text: string; endpoint: string } 
     if (insertAt < 0) insertAt = lines.length;
     while (insertAt > peerIdx + 1 && !lines[insertAt - 1].trim()) insertAt--;
 
-    lines.splice(insertAt, 0, "#@ws:AllowedApps = Discord, Update");
+    lines.splice(insertAt, 0, `#@ws:AllowedApps = ${resolveDiscordAllowedApps()}`);
     return { text: `${lines.join("\r\n")}\r\n`, endpoint };
 }
 

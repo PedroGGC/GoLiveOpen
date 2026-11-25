@@ -194,6 +194,24 @@ function Uninstall-WireSockPackage {
     }
 }
 
+function Resolve-DiscordAllowedApps {
+    $discordDir = Join-Path $UserLocalAppData "Discord"
+    $apps = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path $discordDir) {
+        $latestExe = Get-ChildItem -Path $discordDir -Filter "Discord.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($latestExe) { $apps.Add($latestExe.FullName) }
+        $updater = Join-Path $discordDir "Update.exe"
+        if (Test-Path $updater) { $apps.Add($updater) }
+    }
+    if ($apps.Count -eq 0) {
+        $apps.Add("Discord.exe")
+        $apps.Add("Update.exe")
+    }
+    return ($apps -join ", ")
+}
+
 function ConvertTo-DiscordWireSockConf {
     param([string]$RawText)
 
@@ -224,7 +242,7 @@ function ConvertTo-DiscordWireSockConf {
         $insertAt--
     }
 
-    $lines.Insert($insertAt, "#@ws:AllowedApps = Discord, Update")
+    $lines.Insert($insertAt, "#@ws:AllowedApps = $(Resolve-DiscordAllowedApps)")
     return ($lines -join "`r`n") + "`r`n"
 }
 

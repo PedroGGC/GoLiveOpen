@@ -331,13 +331,6 @@ function AboutPlugin() {
                     </Paragraph>
                 )}
             </Card>
-
-            <Card variant="normal">
-                <Heading tag="h5">Como funciona (zero impacto nos jogos)</Heading>
-                <Paragraph className={Margins.top8}>
-                    O túnel roteia apenas <code>Discord.exe</code> e <code>Update.exe</code> pelo WireSock, sem alterar o DNS do Windows nem o ping dos seus jogos. Depois da primeira configuração, não abre PowerShell nem pede reinício ao abrir o Discord.
-                </Paragraph>
-            </Card>
         </div>
     );
 }
